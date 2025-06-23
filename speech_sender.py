@@ -60,6 +60,26 @@ def misura_rumore_ambientale(durata: float = 5.0, fs: int = DEFAULT_FS) -> float
         print(f"Errore misurazione: {str(e)}")
         return MIN_DB
     
+
+async def invia_notifica_WS(rumore: float, soglia_rumore: float):
+    """Invia una notifica via WebSocket quando il rumore supera la soglia"""
+    global connessione_attiva
+    
+    if not connessione_attiva:
+        return
+        
+    messaggio = {
+        "tipo": "notifica",
+        "rumore": float(rumore),
+        "soglia": float(soglia_rumore)
+    }
+    
+    try:
+        await connessione_attiva.send(json.dumps(messaggio))
+        print("Notifica inviata con successo")
+    except Exception as e:
+        print(f"Errore nell'invio della notifica: {str(e)}")
+
 async def monitora_livello_ambientale(fs: int = DEFAULT_FS, intervallo: int = 2):
     """Monitoraggio con invio notifiche"""
     global filtro_attivo, soglia_rumore
@@ -73,6 +93,7 @@ async def monitora_livello_ambientale(fs: int = DEFAULT_FS, intervallo: int = 2)
             
             if rumore >= soglia_rumore:
                 print("Soglia superata!")
+                await invia_notifica_WS(rumore, soglia_rumore)
             if filtro_attivo:
                 print("(Avvierò trascrizione qui...)")
                
