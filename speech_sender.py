@@ -60,6 +60,29 @@ def misura_rumore_ambientale(durata: float = 5.0, fs: int = DEFAULT_FS) -> float
         print(f"Errore misurazione: {str(e)}")
         return MIN_DB
     
+async def monitora_livello_ambientale(fs: int = DEFAULT_FS, intervallo: int = 2):
+    """Monitoraggio con invio notifiche"""
+    global filtro_attivo, soglia_rumore
+    
+    print("Avvio monitoraggio rumore ambientale...")
+    
+    while True:
+        try:
+            rumore = misura_rumore_ambientale(durata=5, fs=fs)
+            print(f"Rumore attuale: {rumore} dB(A) | Soglia: {soglia_rumore} dB")
+            
+            if rumore >= soglia_rumore:
+                print("Soglia superata!")
+            if filtro_attivo:
+                print("(Avvierò trascrizione qui...)")
+               
+        except Exception as e:
+            print(f"Errore monitoraggio: {str(e)}")
+            await asyncio.sleep(5)
+            continue
+            
+        await asyncio.sleep(intervallo)
+    
 async def shutdown(signal, loop, websocket_server):
     """Pulizia delle risorse e shutdown ordinato"""
     print(f"Ricevuto segnale {signal.name}, shutdown in corso...")
@@ -101,6 +124,7 @@ async def main():
     try:
         async with websockets.serve(gestisci_connessione, "0.0.0.0", 8765) as server:
             websocket_server = server
+            await monitora_livello_ambientale()
             await asyncio.Future()  # Mantiene il server attivo
     except asyncio.CancelledError:
         print("Operazioni annullate durante lo shutdown")
