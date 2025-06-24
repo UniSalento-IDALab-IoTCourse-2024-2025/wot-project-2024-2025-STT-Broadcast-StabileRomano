@@ -1,24 +1,86 @@
 import sounddevice as sd
 import numpy as np
+import signal
+import sys
+import asyncio
+from functools import partial
 import websockets
 import json
-import speech_recognition as sr
-import wave
-import io
 from typing import Optional
-import sys
-import signal
-import asyncio
+import wave
+import speech_recognition as sr
+import io
+from bleak import BleakScanner
+import socket
 
 connessione_attiva = None
 
 REF_PRESSURE = 2e-5
 MIN_DB = 30.0
 DEFAULT_FS = 44100
+LOG_FILE = "beacon_status.log"
 
 # Stato condiviso
 filtro_attivo = False
 soglia_rumore = 85.0
+
+UDP_PORT = 5005
+
+beacon_corrente = None
+
+async def leggi_beacon_da_file():
+    """Legge l'ultimo beacon rilevato dal file di log"""
+    global beacon_corrente
+    
+    while True:
+        try:
+            with open(LOG_FILE, 'r') as f:
+                contenuto = f.read().strip()
+            
+            # Prendo l'ID beacon dalla riga (esempio: "2023-10-20 12:34:56 - Beacon attivo: 014522 (RSSI: -45 dBm)")
+            if "Beacon attivo:" in contenuto:
+                parts = contenuto.split("Beacon attivo:")
+                if len(parts) > 1:
+                    nuovo_beacon = parts[1].split()[0].strip()
+                    
+                    if nuovo_beacon != beacon_corrente:
+                        print(f"Cambio beacon: {beacon_corrente} -> {nuovo_beacon}")
+                        beacon_corrente = nuovo_beacon
+            
+            elif "Nessun beacon rilevato" in contenuto:
+                if beacon_corrente is not None:
+                    print("Nessun beacon valido trovato")
+                beacon_corrente = None
+                
+        except FileNotFoundError:
+            print(f"File {LOG_FILE} non trovato - nessun beacon rilevato")
+            beacon_corrente = None
+        except Exception as e:
+            print(f"Errore lettura file beacon: {e}")
+            beacon_corrente = None
+        
+        await asyncio.sleep(5)  # Intervallo tra le letture del file
+
+async def invia_broadcast(testo: str):
+    """
+    Invia testo al gruppo associato al beacon primario (aggiornato da task parallelo)
+    """
+    try:
+        if not beacon_corrente:
+            print("Nessun beacon primario disponibile per invio")
+            return
+
+        messaggio = f"{beacon_corrente}|{testo}"
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.settimeout(0.5)
+        sock.sendto(messaggio.encode(), ('<broadcast>', UDP_PORT))
+        sock.close()
+
+        print(f"Broadcast inviato a {beacon_corrente}: {testo}")
+
+    except Exception as e:
+        print(f"Errore broadcast: {e}")
 
 async def gestisci_connessione(websocket, path=None):
     global filtro_attivo, soglia_rumore, connessione_attiva
@@ -136,7 +198,7 @@ async def stt_da_registrazione(audio_data: np.ndarray, fs: int = DEFAULT_FS) -> 
             audio_pcm = (audio_data * 32767).astype(np.int16)
             wav_file.writeframes(audio_pcm.tobytes())
         
-        wav_io.seek(0)
+        wav_io.seek(0)  # Torna all'inizio del file
         
         # Inizializza il recognizer
         recognizer = sr.Recognizer()
@@ -177,7 +239,8 @@ async def monitora_livello_ambientale(fs: int = DEFAULT_FS, intervallo: int = 0.
             if filtro_attivo:
                 testo = await stt_da_registrazione(audio)
                 if testo:
-                    print(f"Hai detto: {testo}")
+                    print(f"Invio trascrizione: {testo}")
+                    await invia_broadcast(testo)
                
         except Exception as e:
             print(f"Errore monitoraggio: {str(e)}")
@@ -223,11 +286,12 @@ async def main():
             signal.signal(s, lambda s, _: asyncio.create_task(shutdown(s, loop, websocket_server)))
     
     print("Avvio server WebSocket su ws://0.0.0.0:8765")
-
+    
     try:
         async with websockets.serve(gestisci_connessione, "0.0.0.0", 8765) as server:
             websocket_server = server
-            await monitora_livello_ambientale()
+            asyncio.create_task(leggi_beacon_da_file())
+            await monitora_livello_ambientale()  # Avvia il monitoraggio
             await asyncio.Future()  # Mantiene il server attivo
     except asyncio.CancelledError:
         print("Operazioni annullate durante lo shutdown")
