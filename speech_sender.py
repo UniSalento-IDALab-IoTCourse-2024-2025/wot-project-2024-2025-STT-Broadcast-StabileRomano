@@ -2,6 +2,10 @@ import sounddevice as sd
 import numpy as np
 import websockets
 import json
+import speech_recognition as sr
+import wave
+import io
+from typing import Optional
 import sys
 import signal
 import asyncio
@@ -80,7 +84,82 @@ async def invia_notifica_WS(rumore: float, soglia_rumore: float):
     except Exception as e:
         print(f"Errore nell'invio della notifica: {str(e)}")
 
-async def monitora_livello_ambientale(fs: int = DEFAULT_FS, intervallo: int = 2):
+def acquisisci_audio_e_spl(durata: float = 1.0, fs: int = DEFAULT_FS) -> tuple[float, np.ndarray]:
+    """
+    Registra audio per una durata specifica e calcola il livello di pressione sonora (SPL).
+    Restituisce una tupla: (spl_db, audio_numpy)
+    """
+    try:
+        # Registra l'audio
+        audio = sd.rec(int(durata * fs), samplerate=fs, channels=1, dtype='float32')
+        sd.wait()
+
+        audio_data = audio.flatten()
+
+        trim_samples = int(0.1 * fs)
+        audio_trimmed = (
+            audio_data[trim_samples:-trim_samples]
+            if len(audio_data) > 2 * trim_samples
+            else audio_data
+        )
+
+        # Calcolo SPL (dB(A))
+        rms = np.sqrt(np.mean(np.square(audio_trimmed)))
+        spl = 20 * np.log10(max(rms, 1e-10) / REF_PRESSURE)
+        spl = round(max(spl, MIN_DB), 1)
+
+        return audio_data, spl  # ritorna anche l'audio completo, non solo quello "trimmed"
+    
+    except Exception as e:
+        print(f"Errore durante l'acquisizione audio: {str(e)}")
+        return MIN_DB, np.zeros(int(durata * fs))
+
+async def stt_da_registrazione(audio_data: np.ndarray, fs: int = DEFAULT_FS) -> Optional[str]:
+    """
+    Estrae testo parlato dall'audio (già registrato) usando speech_recognition.
+    Modificato per processare solo una volta l'audio ricevuto.
+    """
+    global filtro_attivo
+
+    if not filtro_attivo:
+        return None
+
+    try:
+        wav_io = io.BytesIO()
+        
+        with wave.open(wav_io, 'wb') as wav_file:
+            wav_file.setnchannels(1)  # mono
+            wav_file.setsampwidth(2)  # 16-bit = 2 bytes
+            wav_file.setframerate(fs)
+            
+            # Converti float32 [-1, 1] in PCM 16-bit
+            audio_pcm = (audio_data * 32767).astype(np.int16)
+            wav_file.writeframes(audio_pcm.tobytes())
+        
+        wav_io.seek(0)
+        
+        # Inizializza il recognizer
+        recognizer = sr.Recognizer()
+        
+        with sr.AudioFile(wav_io) as source:
+            audio = recognizer.record(source)  # Legge tutto il file audio
+            
+            try:
+                testo = recognizer.recognize_google(audio, language='it-IT')
+                print("Testo riconosciuto:", testo)
+                return testo
+                
+            except sr.UnknownValueError:
+                print("Non sono riuscito a capire l'audio")
+            except sr.RequestError as e:
+                print(f"Errore nel servizio di riconoscimento vocale: {e}")
+                
+    except Exception as e:
+        print(f"Errore durante STT con speech_recognition: {str(e)}")
+
+    return None
+
+async def monitora_livello_ambientale(fs: int = DEFAULT_FS, intervallo: int = 0.8):
     """Monitoraggio con invio notifiche"""
     global filtro_attivo, soglia_rumore
     
@@ -88,14 +167,17 @@ async def monitora_livello_ambientale(fs: int = DEFAULT_FS, intervallo: int = 2)
     
     while True:
         try:
-            rumore = misura_rumore_ambientale(durata=5, fs=fs)
+            audio, rumore = acquisisci_audio_e_spl(durata=7, fs=fs)
             print(f"Rumore attuale: {rumore} dB(A) | Soglia: {soglia_rumore} dB")
             
             if rumore >= soglia_rumore:
-                print("Soglia superata!")
+                print("Soglia superata! Invio notifica...")
                 await invia_notifica_WS(rumore, soglia_rumore)
+                
             if filtro_attivo:
-                print("(Avvierò trascrizione qui...)")
+                testo = await stt_da_registrazione(audio)
+                if testo:
+                    print(f"Hai detto: {testo}")
                
         except Exception as e:
             print(f"Errore monitoraggio: {str(e)}")
